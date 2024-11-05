@@ -3,7 +3,6 @@ import time
 
 import torch
 import torch.multiprocessing as mp
-from numpy.ma.core import indices
 from tqdm import tqdm
 
 from gaussian_splatting.gaussian_renderer import render
@@ -124,12 +123,20 @@ class BackEnd(mp.Process):
                     viewspace_point_tensor, visibility_filter
                 )
                 if mapping_iteration % self.init_gaussian_update == 0:
-                    self.gaussians.densify_and_prune(
-                        self.opt_params.densify_grad_threshold,
-                        self.init_gaussian_th,
-                        self.init_gaussian_extent,
-                        None,
-                    )
+                    if (torch.cuda.mem_get_info()[0]) / 1024 ** 3 > 0.8:
+                        self.gaussians.densify_and_prune(
+                            self.opt_params.densify_grad_threshold,
+                            self.init_gaussian_th,
+                            self.init_gaussian_extent,
+                            None,
+                        )
+                    else:
+                        self.gaussians.densify_and_prune(
+                            10000,
+                            self.init_gaussian_th * 2,
+                            self.init_gaussian_extent,
+                            None,
+                        )
 
                 if self.iteration_count == self.init_gaussian_reset or (
                     self.iteration_count == self.opt_params.densify_from_iter
@@ -455,7 +462,7 @@ class BackEnd(mp.Process):
                                 {
                                     "params": [viewpoint.cam_rot_delta],
                                     "lr": self.config["Training"]["lr"]["cam_rot_delta"]
-                                    * 0.5,
+                                          * 0.5,
                                     "name": "rot_{}".format(viewpoint.uid),
                                 }
                             )
@@ -463,9 +470,9 @@ class BackEnd(mp.Process):
                                 {
                                     "params": [viewpoint.cam_trans_delta],
                                     "lr": self.config["Training"]["lr"][
-                                        "cam_trans_delta"
-                                    ]
-                                    * 0.5,
+                                              "cam_trans_delta"
+                                          ]
+                                          * 0.5,
                                     "name": "trans_{}".format(viewpoint.uid),
                                 }
                             )

@@ -204,7 +204,7 @@ class FrontEnd(mp.Process):
         self.median_depth = get_median_depth(depth, opacity)
 
         # save result
-        image_numpy = (image.detach().cpu().numpy().transpose((1, 2, 0)) * 255).astype(np.uint8)
+        image_numpy = (torch.clip(image, 0, 1).detach().cpu().numpy().transpose((1, 2, 0)) * 255).astype(np.uint8)
         save_dir = Path(self.save_dir) / "tracking"
         save_dir.mkdir(parents=True, exist_ok=True)
         Image.fromarray(image_numpy).save(save_dir/ "{}.png".format(cur_frame_idx))
