@@ -15,7 +15,7 @@ import numpy as np
 import open3d as o3d
 import torch
 from plyfile import PlyData, PlyElement
-from simple_knn._C import distCUDA2
+from simple_knn._C import distCUDA2 # noqa
 from torch import nn
 
 from gaussian_splatting.utils.general_utils import (

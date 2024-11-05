@@ -3,6 +3,7 @@ import time
 
 import torch
 import torch.multiprocessing as mp
+from numpy.ma.core import indices
 from tqdm import tqdm
 
 from gaussian_splatting.gaussian_renderer import render
@@ -84,7 +85,8 @@ class BackEnd(mp.Process):
             self.backend_queue.get()
 
     def initialize_map(self, cur_frame_idx, viewpoint):
-        for mapping_iteration in range(self.init_itr_num):
+        indicator = tqdm(range(self.init_itr_num), "initializing map")
+        for mapping_iteration in indicator:
             self.iteration_count += 1
             render_pkg = render(
                 viewpoint, self.gaussians, self.pipeline_params, self.background
@@ -110,7 +112,9 @@ class BackEnd(mp.Process):
                 self.config, image, depth, viewpoint, opacity, initialization=True
             )
             loss_init.backward()
-
+            indicator.set_postfix(
+                loss=loss_init.item(),
+            )
             with torch.no_grad():
                 self.gaussians.max_radii2D[visibility_filter] = torch.max(
                     self.gaussians.max_radii2D[visibility_filter],
@@ -137,6 +141,7 @@ class BackEnd(mp.Process):
 
         self.occ_aware_visibility[cur_frame_idx] = (n_touched > 0).long()
         Log("Initialized map")
+        indicator.close()
         return render_pkg
 
     def map(self, current_window, prune=False, iters=1):
@@ -152,8 +157,8 @@ class BackEnd(mp.Process):
             if cam_idx in current_window_set:
                 continue
             random_viewpoint_stack.append(viewpoint)
-
-        for _ in range(iters):
+        indicator = tqdm(range(iters), "mapping")
+        for _ in indicator:
             self.iteration_count += 1
             self.last_sent += 1
 
@@ -230,6 +235,10 @@ class BackEnd(mp.Process):
             isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
             loss_mapping += 10 * isotropic_loss.mean()
             loss_mapping.backward()
+
+            indicator.set_postfix(
+                loss=loss_mapping.item(),
+            )
             gaussian_split = False
             ## Deinsifying / Pruning Gaussians
             with torch.no_grad():
@@ -315,13 +324,15 @@ class BackEnd(mp.Process):
                     if viewpoint.uid == 0:
                         continue
                     update_pose(viewpoint)
+        indicator.close()
         return gaussian_split
 
     def color_refinement(self):
         Log("Starting color refinement")
 
         iteration_total = 26000
-        for iteration in tqdm(range(1, iteration_total + 1)):
+        indicator = tqdm(range(1, iteration_total + 1), "color refinement")
+        for iteration in indicator:
             viewpoint_idx_stack = list(self.viewpoints.keys())
             viewpoint_cam_idx = viewpoint_idx_stack.pop(
                 random.randint(0, len(viewpoint_idx_stack) - 1)
@@ -342,6 +353,9 @@ class BackEnd(mp.Process):
                 Ll1
             ) + self.opt_params.lambda_dssim * (1.0 - ssim(image, gt_image))
             loss.backward()
+            indicator.set_postfix(
+                loss=loss.item(),
+            )
             with torch.no_grad():
                 self.gaussians.max_radii2D[visibility_filter] = torch.max(
                     self.gaussians.max_radii2D[visibility_filter],
@@ -351,6 +365,7 @@ class BackEnd(mp.Process):
                 self.gaussians.optimizer.zero_grad(set_to_none=True)
                 self.gaussians.update_learning_rate(iteration)
         Log("Map refinement done")
+        indicator.close()
 
     def push_to_frontend(self, tag=None):
         self.last_sent = 0

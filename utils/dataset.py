@@ -1,6 +1,7 @@
 import csv
 import glob
 import os
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -50,6 +51,19 @@ class TUMParser:
         self.input_folder = input_folder
         self.load_poses(self.input_folder, frame_rate=32)
         self.n_img = len(self.color_paths)
+        # # visualize camera poses
+        # # this poses are w2c (world to camera)
+        # c2w = [np.linalg.inv(pose) for pose in self.poses]
+        # c2w = np.stack(c2w, axis=0)
+        # import plotly.express as px
+        # fig = px.scatter_3d(
+        #     x=c2w[:, 0, 3],
+        #     y=c2w[:, 1, 3],
+        #     z=c2w[:, 2, 3],
+        #     color=np.arange(c2w.shape[0]),
+        # )
+        # fig.update_layout(scene=dict(aspectmode="data"))
+        # fig.show()
 
     def parse_list(self, filepath, skiprows=0):
         data = np.loadtxt(filepath, delimiter=" ", dtype=np.unicode_, skiprows=skiprows)
@@ -122,6 +136,49 @@ class TUMParser:
             self.frames.append(frame)
 
 
+class SlamFolderParser:
+    def __init__(self, *, image_folder: Path, depth_folder: Path, max_num_poses: int = 100, meta_json: Path):
+        self.image_folder = image_folder
+        self.depth_folder = depth_folder
+        self.max_num_poses = max_num_poses
+
+        image_paths = sorted(list(image_folder.glob("*.jpeg")))
+        depth_paths = sorted(list(depth_folder.glob("*.npz")))
+        assert len(image_paths) == len(depth_paths), (f"Number of images and depth maps do not match,"
+                                                      f" {len(image_paths)} != {len(depth_paths)}")
+
+        self.image_paths = image_paths
+        self.depth_paths = depth_paths
+
+        self.meta_json = meta_json
+        assert self.meta_json.exists() and self.meta_json.is_file(), f"Meta json file {self.meta_json} does not exist"
+        self.load_poses()
+
+    def load_poses(self):
+        from utils.helper import _read_slam_intrinsic_and_extrinsic
+        camera_dict, image_dict = _read_slam_intrinsic_and_extrinsic(json_path=self.meta_json,
+                                                                     image_folder=self.image_folder,
+                                                                     output_convention="opencv")
+
+        image_dict = {k: x for k, x in image_dict.items() if x.camera_id == 1}
+
+        from utils.helper import readColmapCameras
+        camera_infos = readColmapCameras(cam_extrinsics=image_dict, cam_intrinsics=camera_dict,
+                                         images_folder=self.image_folder.as_posix())
+
+        image_paths = [x.image_path for x in camera_infos]
+        depth_paths = [x.replace("images", "depths").replace("jpeg", "png") for x in image_paths]
+        poses = [x.c2w for x in camera_infos]
+
+        self.image_paths = image_paths[:100]
+        self.color_paths = image_paths[:100]
+        self.depth_paths = depth_paths[:100]
+        self.poses = poses[:100]
+        self.n_img = len(image_paths)
+
+
+
+
 class EuRoCParser:
     def __init__(self, input_folder, start_idx=0):
         self.input_folder = input_folder
@@ -173,8 +230,7 @@ class EuRoCParser:
             trans = data[pose_indices[i], 1:4]
             quat = data[pose_indices[i], 4:8]
             quat = quat[[1, 2, 3, 0]]
-            
-            
+
             T_w_i = trimesh.transformations.quaternion_matrix(np.roll(quat, 1))
             T_w_i[:3, 3] = trans
             T_w_c = np.dot(T_w_i, T_i_c0)
@@ -431,11 +487,11 @@ class RealsenseDataset(BaseDataset):
         super().__init__(args, path, config)
         self.pipeline = rs.pipeline()
         self.h, self.w = 720, 1280
-        
+
         self.depth_scale = 0
         if self.config["Dataset"]["sensor_type"] == "depth":
-            self.has_depth = True 
-        else: 
+            self.has_depth = True
+        else:
             self.has_depth = False
 
         self.rs_config = rs.config()
@@ -458,7 +514,7 @@ class RealsenseDataset(BaseDataset):
             self.profile.get_stream(rs.stream.color)
         )
         self.rgb_intrinsics = self.rgb_profile.get_intrinsics()
-        
+
         self.fx = self.rgb_intrinsics.fx
         self.fy = self.rgb_intrinsics.fy
         self.cx = self.rgb_intrinsics.ppx
@@ -479,14 +535,11 @@ class RealsenseDataset(BaseDataset):
 
         if self.has_depth:
             self.depth_sensor = self.profile.get_device().first_depth_sensor()
-            self.depth_scale  = self.depth_sensor.get_depth_scale()
+            self.depth_scale = self.depth_sensor.get_depth_scale()
             self.depth_profile = rs.video_stream_profile(
                 self.profile.get_stream(rs.stream.depth)
             )
             self.depth_intrinsics = self.depth_profile.get_intrinsics()
-        
-        
-
 
     def __getitem__(self, idx):
         pose = torch.eye(4, device=self.device, dtype=self.dtype)
@@ -498,7 +551,7 @@ class RealsenseDataset(BaseDataset):
             aligned_frames = self.align.process(frameset)
             rgb_frame = aligned_frames.get_color_frame()
             aligned_depth_frame = aligned_frames.get_depth_frame()
-            depth = np.array(aligned_depth_frame.get_data())*self.depth_scale
+            depth = np.array(aligned_depth_frame.get_data()) * self.depth_scale
             depth[depth < 0] = 0
             np.nan_to_num(depth, nan=1000)
         else:
@@ -519,6 +572,20 @@ class RealsenseDataset(BaseDataset):
         return image, depth, pose
 
 
+class SLAMDataset(MonocularDataset):
+    def __init__(self, args, path, config):
+        super().__init__(args, path, config)
+        dataset_path = config["Dataset"]["dataset_path"]
+        parser = SlamFolderParser(image_folder=Path(dataset_path, "images"),
+                                  depth_folder=Path(dataset_path, "depths"),
+                                  meta_json=Path(dataset_path).parent / "undistorted" / "meta.json")
+        self.num_imgs = parser.n_img
+        self.color_paths = parser.color_paths
+        self.depth_paths = parser.depth_paths
+        self.poses = parser.poses
+        self.num_imgs = len(self.color_paths)
+
+
 def load_dataset(args, path, config):
     if config["Dataset"]["type"] == "tum":
         return TUMDataset(args, path, config)
@@ -528,5 +595,7 @@ def load_dataset(args, path, config):
         return EurocDataset(args, path, config)
     elif config["Dataset"]["type"] == "realsense":
         return RealsenseDataset(args, path, config)
+    elif config["Dataset"]["type"] == "slam":
+        return SLAMDataset(args, path, config)
     else:
         raise ValueError("Unknown dataset type")

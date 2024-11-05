@@ -1,8 +1,11 @@
 import time
+from pathlib import Path
 
 import numpy as np
 import torch
 import torch.multiprocessing as mp
+from PIL import Image
+from tqdm import tqdm
 
 from gaussian_splatting.gaussian_renderer import render
 from gaussian_splatting.utils.graphics_utils import getProjectionMatrix2, getWorld2View2
@@ -59,6 +62,7 @@ class FrontEnd(mp.Process):
         self.kf_indices.append(cur_frame_idx)
         viewpoint = self.cameras[cur_frame_idx]
         gt_img = viewpoint.original_image.cuda()
+        # depth = torch.tensor(viewpoint.depth).cuda().float()
         valid_rgb = (gt_img.sum(dim=0) > rgb_boundary_threshold)[None]
         if self.monocular:
             if depth is None:
@@ -160,7 +164,8 @@ class FrontEnd(mp.Process):
         )
 
         pose_optimizer = torch.optim.Adam(opt_params)
-        for tracking_itr in range(self.tracking_itr_num):
+        indicator = tqdm(range(self.tracking_itr_num), desc="Tracking")
+        for tracking_itr in indicator:
             render_pkg = render(
                 viewpoint, self.gaussians, self.pipeline_params, self.background
             )
@@ -174,6 +179,9 @@ class FrontEnd(mp.Process):
                 self.config, image, depth, opacity, viewpoint
             )
             loss_tracking.backward()
+            indicator.set_postfix(
+                loss_tracking=loss_tracking.item()
+            )
 
             with torch.no_grad():
                 pose_optimizer.step()
@@ -191,8 +199,16 @@ class FrontEnd(mp.Process):
                 )
             if converged:
                 break
+        indicator.close()
 
         self.median_depth = get_median_depth(depth, opacity)
+
+        # save result
+        image_numpy = (image.detach().cpu().numpy().transpose((1, 2, 0)) * 255).astype(np.uint8)
+        save_dir = Path(self.save_dir) / "tracking"
+        save_dir.mkdir(parents=True, exist_ok=True)
+        Image.fromarray(image_numpy).save(save_dir/ "{}.png".format(cur_frame_idx))
+
         return render_pkg
 
     def is_keyframe(
@@ -202,6 +218,7 @@ class FrontEnd(mp.Process):
         cur_frame_visibility_filter,
         occ_aware_visibility,
     ):
+        return True
         kf_translation = self.config["Training"]["kf_translation"]
         kf_min_translation = self.config["Training"]["kf_min_translation"]
         kf_overlap = self.config["Training"]["kf_overlap"]
@@ -410,7 +427,8 @@ class FrontEnd(mp.Process):
                     continue
 
                 last_keyframe_idx = self.current_window[0]
-                check_time = (cur_frame_idx - last_keyframe_idx) >= self.kf_interval
+                # check_time = (cur_frame_idx - last_keyframe_idx) >= self.kf_interval
+                check_time = True
                 curr_visibility = (render_pkg["n_touched"] > 0).long()
                 create_kf = self.is_keyframe(
                     cur_frame_idx,

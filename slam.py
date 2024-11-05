@@ -1,15 +1,15 @@
 import os
-import sys
 import time
 from argparse import ArgumentParser
 from datetime import datetime
 
+import rich
 import torch
 import torch.multiprocessing as mp
-import yaml
-from munch import munchify
-
 import wandb
+import yaml
+from munch import munchify  # attribute style access to dictionary.
+
 from gaussian_splatting.scene.gaussian_model import GaussianModel
 from gaussian_splatting.utils.system_utils import mkdir_p
 from gui import gui_utils, slam_gui
@@ -100,9 +100,11 @@ class SLAM:
             q_vis2main=q_vis2main,
         )
 
-        backend_process = mp.Process(target=self.backend.run)
+        # backend_process = mp.Process(target=self.backend.run)
+        backend_process = self.backend
         if self.use_gui:
             gui_process = mp.Process(target=slam_gui.run, args=(self.params_gui,))
+            # gui_process = slam_gui.run
             gui_process.start()
             time.sleep(5)
 
@@ -204,7 +206,7 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=str)
     parser.add_argument("--eval", action="store_true")
 
-    args = parser.parse_args(sys.argv[1:])
+    args = parser.parse_args()
 
     mp.set_start_method("spawn")
 
@@ -250,6 +252,8 @@ if __name__ == "__main__":
         wandb.define_metric("ate*", step_metric="frame_idx")
 
     slam = SLAM(config, save_dir=save_dir)
+
+    rich.print("I am at the end of the SLAM initialization")
 
     slam.run()
     wandb.finish()

@@ -14,3 +14,7 @@ datasets
 wandb
 
 result*
+.idea
+venv
+screenshots
+
